@@ -5,6 +5,7 @@ The "P" in MCP is for Persistent.
 - Easy install
 - Supports various MCP clients.
   - Claude Desktop
+  - 5ire
   - (TODO: Comming soon)
 - Persistent via
   - Config
