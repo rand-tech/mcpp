@@ -82,6 +82,38 @@ class ClaudeDesktop(_MCP):
             log(f"Error updating configuration file {self.path}: {e}")
             return False
 
+class Fire(_MCPClient):  # 5ire:
+    paths = {
+        'windows': lambda: Path(os.environ.get('APPDATA')) / '5ire' / 'mcp.json',
+        'darwin': lambda: Path(os.path.expanduser('~/Library/Application Support/5ire/mcp.json')),
+    }
+
+    def add_entry(self, data):
+        if data is None:
+            log("Data is None")
+            return False
+        for k in ('key', 'command', 'args'):
+            if k not in data:
+                log(f"Missing key {k} in data")
+                return False
+        if not self.path:
+            return False
+        try:
+            _buf = self.path.read_text()
+            content = json.loads(_buf)
+            _indent = len(_buf.split('"servers"')[0].split('\n')[-1])
+            if any(entry.get('key') == data['key'] for entry in content.get('servers', [])):
+                log(f"Key {data['key']} already exists in {self.path}")
+                return False
+            new_entry = {'name': data.get('name', ''), 'key': data['key'], 'command': data['command'], 'args': data['args']}
+            if 'env' in data:
+                new_entry['env'] = data['env']
+            content.setdefault('servers', []).append(new_entry)
+            self.path.write_text(json.dumps(content, indent=_indent))
+            return True
+        except Exception as e:
+            log(f"Error updating configuration file {self.path}: {e}")
+            return False
 _supported_mcps = {cl.__name__: cl for cl in _MCP.__subclasses__()}
 
 def _dec_cfg(cfg: str):
@@ -106,6 +138,9 @@ class Install(install):
             return
         try:
             name, operation, payload = _dec_cfg(cfg)
+            if name == 'auto':
+                cl = max(_supported_mcps.values(), key=lambda cls: cls().path.stat().st_mtime if (p := cls().path) and p.exists() else 0)
+                name = cl.__name__
             if name not in _supported_mcps:
                 log(f"Unsupported MCP: {name} is not in {_supported_mcps.keys()}")
                 return
