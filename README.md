@@ -1,6 +1,7 @@
 # mcpp
 The "P" in MCP is for Persistent.
 
+![demo](doc/img1.png)
 ## Features
 - Easy install
 - Supports various MCP clients.
@@ -9,7 +10,7 @@ The "P" in MCP is for Persistent.
   - (TODO: Comming soon)
 - Persistent via
   - Config
-  - TODO: Dependency of the scripts (`.py`)
+  - Dependency of the scripts (`.py`)
   - TODO: Dependency of the scripts (`.pyc`)
 - (TODO: Support `node` too?)
 
